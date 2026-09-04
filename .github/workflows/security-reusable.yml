@@ -1,0 +1,289 @@
+name: Security (reusable)
+
+# Org-wide reusable security workflow for bigknoxy repos.
+# Call from a repo with a ~10 line workflow:
+#
+#   name: Security
+#   on:
+#     pull_request:
+#     push: { branches: [main] }
+#     schedule: [{ cron: '0 6 * * 1' }]
+#     workflow_dispatch:
+#   permissions: { contents: read }
+#   jobs:
+#     security:
+#       uses: bigknoxy/.github/.github/workflows/security-reusable.yml@main
+#       with: { language: node, has_docker: true }
+#       secrets: inherit
+#
+# Jobs (each skips cleanly when not applicable):
+#   gitleaks           always. Full history, blocks on findings.
+#   dependency-review  pull_request only. Blocks PRs adding known-vulnerable
+#                      deps (high+) or disallowed licenses. Needs the
+#                      Dependency graph enabled (default on public repos).
+#   codeql             when language != none. Semantic taint analysis.
+#   dep-audit          language-native known-CVE audit:
+#                        go -> govulncheck, node -> npm/pnpm/yarn/bun audit,
+#                        python -> pip-audit, rust -> cargo audit,
+#                        dotnet -> dotnet list package --vulnerable
+#   trivy-fs           when has_docker. Filesystem scan of repo (Dockerfile
+#                      misconfig + lockfile CVEs), CRITICAL/HIGH block.
+#   trivy-image        when has_docker. Builds the Dockerfile and scans the
+#                      resulting image, CRITICAL/HIGH block.
+#
+# All third-party actions pinned to commit SHAs. Bump via Dependabot
+# (github-actions ecosystem) in this repo.
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: 'go | node | python | rust | dotnet | none'
+        required: true
+        type: string
+      has_docker:
+        description: 'Build and scan the Dockerfile with trivy'
+        required: false
+        type: boolean
+        default: false
+      dockerfile:
+        description: 'Path to the Dockerfile'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      docker_context:
+        description: 'Docker build context'
+        required: false
+        type: string
+        default: '.'
+      working_directory:
+        description: 'Directory containing the manifest (package.json, go.mod, ...)'
+        required: false
+        type: string
+        default: '.'
+      codeql_language:
+        description: 'Override CodeQL language id (default derived from language)'
+        required: false
+        type: string
+        default: ''
+      node_audit_level:
+        description: 'npm audit --audit-level'
+        required: false
+        type: string
+        default: 'high'
+      fail_on_severity:
+        description: 'dependency-review fail-on-severity'
+        required: false
+        type: string
+        default: 'high'
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-review:
+    name: dependency-review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: ${{ inputs.fail_on_severity }}
+          comment-summary-in-pr: on-failure
+
+  codeql:
+    name: codeql
+    if: inputs.language != 'none'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve CodeQL language
+        id: lang
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.codeql_language }}" ]; then
+            echo "id=${{ inputs.codeql_language }}" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          case "${{ inputs.language }}" in
+            go) echo "id=go" ;;
+            node) echo "id=javascript-typescript" ;;
+            python) echo "id=python" ;;
+            rust) echo "id=rust" ;;
+            dotnet) echo "id=csharp" ;;
+            *) echo "id=" ;;
+          esac >> "$GITHUB_OUTPUT"
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ steps.lang.outputs.id }}
+          build-mode: ${{ inputs.language == 'dotnet' && 'autobuild' || 'none' }}
+      - uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        if: inputs.language == 'dotnet'
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: '/language:${{ steps.lang.outputs.id }}'
+
+  dep-audit:
+    name: dep-audit (${{ inputs.language }})
+    if: inputs.language != 'none'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # --- go ---
+      - if: inputs.language == 'go'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ${{ inputs.working_directory }}/go.mod
+          cache: true
+      - if: inputs.language == 'go'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # --- node ---
+      - if: inputs.language == 'node'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 'lts/*'
+      - if: inputs.language == 'node'
+        shell: bash
+        run: |
+          set -euo pipefail
+          lvl='${{ inputs.node_audit_level }}'
+          if [ -f bun.lock ] || [ -f bun.lockb ]; then
+            curl -fsSL https://bun.sh/install | bash
+            export PATH="$HOME/.bun/bin:$PATH"
+            bun install --frozen-lockfile
+            bun audit --audit-level="$lvl"
+          elif [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            pnpm install --frozen-lockfile --ignore-scripts
+            pnpm audit --audit-level="$lvl"
+          elif [ -f yarn.lock ]; then
+            corepack enable
+            yarn install --frozen-lockfile --ignore-scripts
+            yarn npm audit --severity "$lvl" || yarn audit --level "$lvl"
+          else
+            npm ci --ignore-scripts
+            npm audit --audit-level="$lvl"
+          fi
+
+      # --- python ---
+      - if: inputs.language == 'python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+      - if: inputs.language == 'python'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip pip-audit
+          if [ -f uv.lock ]; then
+            pip install uv && uv export --frozen --no-hashes -o /tmp/req.txt && pip-audit -r /tmp/req.txt
+          elif [ -f poetry.lock ]; then
+            pip install poetry poetry-plugin-export && poetry export -f requirements.txt -o /tmp/req.txt --without-hashes && pip-audit -r /tmp/req.txt
+          elif [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            pip install . && pip-audit
+          else
+            echo "no python manifest found"; exit 1
+          fi
+
+      # --- rust ---
+      - if: inputs.language == 'rust'
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (v1)
+        with:
+          toolchain: stable
+      - if: inputs.language == 'rust'
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      # --- dotnet ---
+      - if: inputs.language == 'dotnet'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '8.0.x'
+      - if: inputs.language == 'dotnet'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet restore
+          out=$(dotnet list package --vulnerable --include-transitive)
+          echo "$out"
+          if echo "$out" | grep -qE '\b(Critical|High)\b'; then
+            echo "::error::vulnerable NuGet packages found"; exit 1
+          fi
+
+  trivy-fs:
+    name: trivy-fs
+    if: inputs.has_docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.docker_context }}
+          scanners: vuln,misconfig,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: sarif
+          output: trivy-fs.sarif
+      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  trivy-image:
+    name: trivy-image
+    if: inputs.has_docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build image
+        run: docker build -f "${{ inputs.dockerfile }}" -t local/scan:${{ github.sha }} "${{ inputs.docker_context }}"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: local/scan:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: sarif
+          output: trivy-image.sarif
+      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
