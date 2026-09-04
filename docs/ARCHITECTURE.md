@@ -13,6 +13,8 @@ flowchart LR
   end
   caller -- "uses: @main<br/>with: language, has_docker" --> reusable
   dep --> reusable
+  fleet[fleet-audit.yml<br/>weekly] -- "gh api" --> repo
+  fleet --> issue[(tracking issue)]
   reusable --> gl[gitleaks]
   reusable --> dr[dependency-review<br/>PR only]
   reusable --> cq[CodeQL]

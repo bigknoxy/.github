@@ -48,3 +48,12 @@ Then add the job names (`gitleaks`, `codeql`, `dep-audit (<lang>)`, `dependency-
 `trivy-fs`, `trivy-image`) as required status checks in branch protection.
 
 Architecture and rollout: see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## fleet-audit.yml
+
+Weekly sweep of every public, non-archived repo: does it call the reusable workflow,
+are secret scanning, push protection and Dependabot alerts on, and how many open
+critical/high Dependabot alerts. Upserts one tracking issue here titled
+"Fleet security audit". Requires the `FLEET_AUDIT_TOKEN` secret (fine-grained PAT,
+read on all repos plus issues write here); without it the job skips with a warning.
+Run on demand from the Actions tab.

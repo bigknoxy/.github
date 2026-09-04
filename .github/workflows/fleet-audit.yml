@@ -1,0 +1,72 @@
+name: Fleet security audit
+
+# Weekly sweep of every public, non-archived bigknoxy repo. Checks that each
+# one calls the reusable security workflow and has GitHub-native protections
+# on, then upserts a single tracking issue in this repo with a status table.
+#
+# Needs secret FLEET_AUDIT_TOKEN: fine-grained PAT covering all bigknoxy
+# repos with Contents read, Administration read, Secret scanning alerts read,
+# Dependabot alerts read, and Issues read/write on this repo. GITHUB_TOKEN
+# cannot see other repos, so the job skips with a warning if it is missing.
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Audit
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_AUDIT_TOKEN }}
+          OWNER: bigknoxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::FLEET_AUDIT_TOKEN not set; skipping"; exit 0
+          fi
+          repos=$(gh repo list "$OWNER" --limit 200 --no-archived --json name,visibility \
+                  --jq '.[] | select(.visibility=="PUBLIC") | .name' | sort)
+          {
+            echo "Weekly audit, $(date -u +%F). ✅ ok · ❌ missing · — n/a"
+            echo
+            echo "| repo | reusable caller | secret scan | push protect | dependabot alerts | open crit/high |"
+            echo "|---|---|---|---|---|---|"
+          } > body.md
+          mark() { case "$1" in enabled) echo "✅";; disabled) echo "❌";; *) echo "—";; esac; }
+          missing=0
+          for r in $repos; do
+            [ "$r" = ".github" ] && continue
+            caller="❌"
+            for f in $(gh api "repos/$OWNER/$r/contents/.github/workflows" --jq '.[].name' 2>/dev/null || true); do
+              if gh api "repos/$OWNER/$r/contents/.github/workflows/$f" --jq .content 2>/dev/null \
+                 | base64 -d | grep -q 'security-reusable.yml'; then caller="✅"; break; fi
+            done
+            sa=$(gh api "repos/$OWNER/$r" --jq '.security_and_analysis' 2>/dev/null || echo '{}')
+            ss=$(echo "$sa" | jq -r '.secret_scanning.status // "n/a"')
+            pp=$(echo "$sa" | jq -r '.secret_scanning_push_protection.status // "n/a"')
+            va=$(gh api "repos/$OWNER/$r/vulnerability-alerts" >/dev/null 2>&1 && echo enabled || echo disabled)
+            ch=$(gh api "repos/$OWNER/$r/dependabot/alerts?state=open&severity=critical,high&per_page=100" \
+                 --jq 'length' 2>/dev/null || echo "?")
+            echo "| $r | $caller | $(mark "$ss") | $(mark "$pp") | $(mark "$va") | $ch |" >> body.md
+            [ "$caller" = "❌" ] && missing=$((missing+1)) || true
+          done
+          {
+            echo
+            echo "Repos without the reusable caller: **$missing**."
+            echo "Fix: copy the caller from this repo's README into \`.github/workflows/security.yml\`."
+          } >> body.md
+          title="Fleet security audit"
+          n=$(gh issue list -R "$OWNER/.github" --search "\"$title\" in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue edit "$n" -R "$OWNER/.github" --body-file body.md
+          else
+            gh issue create -R "$OWNER/.github" --title "$title" --body-file body.md
+          fi
