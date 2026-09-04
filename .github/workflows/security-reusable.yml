@@ -185,8 +185,14 @@ jobs:
             corepack enable
             yarn install --frozen-lockfile --ignore-scripts
             yarn npm audit --severity "$lvl" || yarn audit --level "$lvl"
-          else
+          elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
             npm ci --ignore-scripts
+            npm audit --audit-level="$lvl"
+          else
+            # No lockfile committed (e.g. bun repo with bun.lock gitignored):
+            # resolve a lockfile in-place so npm audit has something to scan.
+            echo "::warning::no lockfile found; resolving one on the fly for audit"
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund
             npm audit --audit-level="$lvl"
           fi
 
