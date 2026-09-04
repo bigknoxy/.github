@@ -25,6 +25,10 @@ permissions:
 jobs:
   security:
     uses: bigknoxy/.github/.github/workflows/security-reusable.yml@main
+    permissions:
+      contents: read
+      security-events: write   # SARIF upload (CodeQL, trivy)
+      pull-requests: write     # dependency-review PR comment
     with:
       language: node        # go | node | python | rust | dotnet | none
       has_docker: false
@@ -43,6 +47,9 @@ jobs:
 | `codeql_language` | derived | override CodeQL language id |
 | `node_audit_level` | `high` | |
 | `fail_on_severity` | `high` | dependency-review threshold |
+
+The job-level `permissions` block is required: a called workflow can never hold more than
+the caller grants it, and GitHub fails the run at startup if it asks for more.
 
 Then add the job names (`gitleaks`, `codeql`, `dep-audit (<lang>)`, `dependency-review`,
 `trivy-fs`, `trivy-image`) as required status checks in branch protection.
