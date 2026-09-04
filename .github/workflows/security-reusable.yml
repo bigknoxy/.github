@@ -134,9 +134,9 @@ jobs:
       - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ steps.lang.outputs.id }}
-          build-mode: ${{ inputs.language == 'dotnet' && 'autobuild' || 'none' }}
+          build-mode: ${{ (inputs.language == 'dotnet' || inputs.language == 'go') && 'autobuild' || 'none' }}
       - uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        if: inputs.language == 'dotnet'
+        if: inputs.language == 'dotnet' || inputs.language == 'go'
       - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: '/language:${{ steps.lang.outputs.id }}'
